@@ -1,0 +1,179 @@
+###Packages
+```{r}
+library(cfbscrapR)
+library(dplyr)
+library(DBI)
+library(ggplot2)
+library(modelr)
+library(readr)
+library(rethinking)
+library(RSQLite)
+library(nflfastR)
+library(tidyverse)
+library(zoo)
+library(gamm4)
+library(mgcv)
+library(ggimage)
+```
+
+#Function of use
+```{r}
+OC_Function <- function(year) {
+
+  pbp_data <- read_rds("Coordinator_NFL_Data.rds") %>%
+  filter(qb_kneel != 1) %>%
+  filter(qb_spike != 1) %>%
+  mutate(play_type = ifelse(play_type == "pass", 1, 0)) %>%
+  select(posteam,
+         play_type,
+         ydstogo,
+         yardline_100,
+         down,
+         wp,
+         half_seconds_remaining,
+         O_Coordinator,
+         season,
+         score_differential,
+         qtr) 
+
+  #data
+  Coordinator_Data <- read_rds("Coordinator_Data.rds") 
+
+  #remove extra whitespace
+  Coordinator_Data$Season  <- gsub("\\s+","",Coordinator_Data$Season)
+  Coordinator_Data$Coordinator <- gsub("\\s+"," ",Coordinator_Data$Coordinator)
+  Coordinator_Data$Team    <- gsub("\\s+","",Coordinator_Data$Team)
+  
+  #abbreviations merged with data
+  df_1 <- Coordinator_Data %>%
+    mutate(Team = ifelse(Team == "Washington", "Redskins", Team)) %>%
+    rename("team_nick" = "Team") %>%
+    left_join(nflfastR::teams_colors_logos, by = "team_nick")
+  
+  df_1$Season <- as.integer(df_1$Season)
+  
+  #Grab 2021 coordinators
+  df_O <- df_1 %>%
+    filter(Side_of_Ball == "Offense") %>%
+    rename("O_Coordinator" = "Coordinator") %>%
+    select(Season, O_Coordinator, team_abbr) %>%
+    rename("season" = "Season") %>%
+    rename("posteam" = "team_abbr") %>%
+    mutate(posteam = ifelse(is.na(posteam)==TRUE, "WAS", posteam)) %>%
+    filter(season == 2021) %>%
+    filter(posteam != "SD" , posteam != "LA" , posteam != "OAK", posteam != "STL") %>%
+    rename("Coord" = "O_Coordinator") %>%
+    arrange(Coord)
+  
+  #get names of OC's
+  names <- pbp_data %>%
+    group_by(O_Coordinator) %>%
+    dplyr::summarise(
+      Coord = unique(O_Coordinator),
+      last_seas = max(season),
+      plays = n()
+    ) %>%
+    select(-O_Coordinator) %>%
+    arrange(last_seas) %>%
+    filter(last_seas == 2020) %>%
+    left_join(df_O, by = c("Coord")) %>%
+    mutate(season = ifelse(Coord == "Kliff Kingsbury ", 2021, season)) %>% #ignore my terrible practice here 
+    mutate(posteam = ifelse(Coord == "Kliff Kingsbury ", "ARI", posteam)) %>%
+    filter(season == 2021) %>%
+    rename("O_Coordinator" = "Coord") %>%
+    rename("Current_Season" = "season")
+  
+  #filter data to only have OC's who coached last season
+  pbp_data <- pbp_data %>%
+    left_join(names, by = c("O_Coordinator")) %>%
+    filter(Current_Season == 2021) %>%
+    filter(season == year) %>%
+    filter(down == 1 | ydstogo == 10)
+  
+  names <- names %>%
+    rename("Coord" = "O_Coordinator")
+
+#Model
+  gam_model <- gamm4(
+    play_type ~
+    ydstogo +
+    yardline_100 +
+    down +
+    wp +
+    half_seconds_remaining +
+    score_differential +
+    qtr,
+  random = ~ (1 | O_Coordinator),
+  data = pbp_data,
+  nAGQ = 0,
+  control = glmerControl(optimizer = "nloptwrap"),
+  family = binomial(link = "logit")
+)
+  
+    #Retrieve estimates and standard errors
+  est <- broom.mixed::tidy(gam_model$mer, effects = "ran_vals") %>%
+    dplyr::rename("Coord" = "level") %>%
+    dplyr::filter(term == "(Intercept)")
+  
+  # Function to convert logit to prob
+  logit2prob <- function(logit) {
+    odds <- exp(logit)
+    prob <- odds / (1 + odds)
+    return(prob)
+  }
+  
+  # Prepare data for plot
+  plot <- merge(est, names, by = "Coord", all.x = T, no.dups = T) %>%
+    arrange(estimate) %>%
+    mutate(
+      lci = estimate - 1.96 * std.error,
+      uci = estimate + 1.96 * std.error,
+      prob = logit2prob(estimate),
+      prob_uci = logit2prob(uci),
+      prob_lci = logit2prob(lci)
+    )
+  
+  
+  #merge in team logos
+  plot  <- plot %>%
+    left_join(nflfastR::teams_colors_logos, by = c("posteam" = "team_abbr"))
+  
+  return(plot)
+}
+
+Data_Plot <- OC_Function(2020)
+
+```
+
+#Plot
+```{r}
+Data_Plot %>%
+  ggplot(aes(x = factor(Coord, level = Coord), prob)) + 
+  geom_linerange(size = .5, aes(
+    ymin = prob_lci,
+    ymax = prob_uci
+  )) +
+    geom_image(
+    aes(
+      image = team_logo_espn
+      )
+    ) +
+  coord_flip() +
+  theme_bw() +
+  labs(
+    y = "Probability of 1st & 10 Pass",
+    title = "Individual Probability of Passing by Coordinator",
+    subtitle = "How each OC increases probability of passing on 1st & 10, controlling for situation | GAMM",
+    caption = "Plot: PatriotsStatsR, Data: NFLFastR & PFR"
+  ) +
+  theme_light() +
+  theme(
+    plot.title = element_text(size = 10, face = "bold"),
+    plot.subtitle = element_text(size = 8),
+    axis.title.y = element_blank(),
+    plot.background = element_rect(fill = "gray97"),
+    panel.background = element_rect(fill = "gray97")
+  ) +
+  ggsave(filename = paste0("coord",".png"), 
+       dpi = 300, type = "cairo", width = 10, height = 7, units = "in")
+```
