@@ -1,0 +1,152 @@
+---
+title: "Data"
+output: html_document
+---
+###Packages
+```{r}
+library(cfbscrapR)
+library(dplyr)
+library(DBI)
+library(ggplot2)
+library(modelr)
+library(readr)
+library(rethinking)
+library(RSQLite)
+library(nflfastR)
+library(tidyverse)
+library(zoo)
+```
+
+#Load seasonal data
+```{r}
+###seasons
+seasons <- 2006:2020
+
+###data
+pbp <- map_df(seasons, function(x) {
+  readRDS(
+    url(
+      paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
+    )
+  ) %>%
+    filter(play_type == "pass" | play_type == "run") %>%
+    filter(is.na(epa) == FALSE) %>%
+    select(play_id, 
+         game_id,
+         home_team,
+         away_team,
+         week,
+         posteam,
+         defteam,
+         yardline_100,
+         game_date,
+         quarter_seconds_remaining,
+         qtr,
+         half_seconds_remaining,
+         drive,
+         time,
+         ydstogo,
+         down,
+         play_type,
+         yards_gained,
+         shotgun,
+         no_huddle,
+         qb_dropback,
+         qb_kneel,
+         qb_spike,
+         yards_after_catch,
+         posteam_timeouts_remaining,
+         defteam_timeouts_remaining,
+         posteam_score,
+         defteam_score,
+         score_differential,
+         ep,
+         epa,
+         wp,
+         def_wp,
+         passer_player_id,
+         passer_player_name,
+         rusher_player_id,
+         rusher_player_name,
+         season,
+         cp,
+         cpoe,
+         temp,
+         wind,
+         home_coach,
+         away_coach,
+         xpass)
+})
+
+ head(pbp)
+```
+
+#Coordinator Data, add team abbreviations for merging with PBP
+```{r}
+#data
+Coordinator_Data <- read_rds("Coordinator_Data.rds") 
+
+#remove extra whitespace
+Coordinator_Data$Season  <- gsub("\\s+","",Coordinator_Data$Season)
+Coordinator_Data$Coordinator <- gsub("\\s+"," ",Coordinator_Data$Coordinator)
+Coordinator_Data$Team    <- gsub("\\s+","",Coordinator_Data$Team)
+
+Coordinator_Data %>%
+  filter(Team == "Patriots")
+
+#abbreviations merged with data
+df_1 <- Coordinator_Data %>%
+  mutate(Team = ifelse(Team == "Washington", "Redskins", Team)) %>%
+  rename("team_nick" = "Team") %>%
+  left_join(nflfastR::teams_colors_logos, by = "team_nick")
+
+df_1$Season <- as.integer(df_1$Season)
+
+#Split into a defensive and offesnive coordinator data frame so we can merge into single rows in the pbp
+df_O <- df_1 %>%
+  filter(Side_of_Ball == "Offense") %>%
+  rename("O_Coordinator" = "Coordinator") %>%
+  select(Season, O_Coordinator, team_abbr) %>%
+  rename("season" = "Season") %>%
+  rename("posteam" = "team_abbr") %>%
+  mutate(posteam = ifelse(is.na(posteam)==TRUE, "WAS", posteam))
+  
+df_D <- df_1 %>%
+  filter(Side_of_Ball == "Defense") %>%
+  rename("D_Coordinator" = "Coordinator") %>%
+  select(Season, D_Coordinator, team_abbr) %>%
+  rename("season" = "Season") %>%
+  rename("defteam" = "team_abbr") %>%
+  mutate(defteam = ifelse(is.na(defteam)==TRUE, "WAS", defteam))
+```
+
+#Add coordinator data to dataframe
+```{r}
+#merge in offense
+pbp <- pbp %>%
+  left_join(df_O, by = c("season", "posteam")) 
+
+pbp <- pbp %>%
+  left_join(df_D, by = c("season", "defteam"))
+
+#Save data
+saveRDS(pbp, "Coordinator_NFL_Data.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
